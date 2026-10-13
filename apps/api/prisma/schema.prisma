@@ -1,0 +1,1644 @@
+// ============================================================================
+// منصة حساب — HESAB | نموذج البيانات الأساسي
+// ============================================================================
+// المرحلة: المرحلة الثانية — نموذج البيانات والعقود (TASK-006)
+//
+// موثّق في: DATA_MODEL.md   |   العقود: API_CONTRACTS.md
+//
+// قواعد ملزمة في هذا الملف (قسم 26 من PROJECT_CONTEXT.md):
+//   1. لا تُحذف السجلات المالية — تُؤرشف أو تُعكس.
+//   2. كل علاقة تصلك بـ User أو Ledger تُمنع عليها Cascade متى كان السجل يحمل أثرًا ماليًا.
+//   3. لا يُحذف القيد المعتمد؛ التصحيح بالعكس عبر reversalOfId.
+//   4. كل مبلغ مالي Decimal(20,4) — لا Float أبدًا.
+//   5. سعر الصرف Decimal(24,12) لئلا يفقد التحويل دقته.
+//
+// ما لا يفرضه هذا الملف (مؤجَّل صراحةً — DATA_MODEL.md §9):
+//   - توازن القيود: مجموع المدين = مجموع الدائن.
+//   - شرط «قيمة ثابتة أو نسبة، لا الاثنان» في الميزانية والتنبيه.
+//   - nonnegative للمبالغ والكميات.
+//   تُفرض في طبقة الخدمة (NestJS) أو بقواعد CHECK في أول migration.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// أنواع مشتركة
+// ============================================================================
+
+/// اتجاه السطر في القيد المحاسبي. التوازن = مجموع DEBIT = مجموع CREDIT.
+enum LineDirection {
+  DEBIT
+  CREDIT
+}
+
+/// نوع الدفتر. ثابت بعد الإنشاء ولا يُحوَّل (قسم 7).
+enum LedgerType {
+  HOUSEHOLD
+  BUSINESS
+}
+
+/// حالة الدفتر.
+enum LedgerStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+/// حالة عضوية دفتر.
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+/// صلاحية ممنوحة داخل دفتر بعينه. القيم أسماء لا حسابات.
+enum Permission {
+  LEDGER_VIEW
+  LEDGER_MANAGE
+  ENTRY_VIEW
+  ENTRY_CREATE
+  ENTRY_CONFIRM
+  ENTRY_POST
+  ENTRY_REVERSE
+  BUDGET_VIEW
+  BUDGET_MANAGE
+  CONTACT_VIEW
+  CONTACT_MANAGE
+  REPORT_VIEW
+  REPORT_SHARE
+  MEMBER_INVITE
+  MEMBER_MANAGE
+}
+
+/// حالة دعوة المستخدم المرتبط (قسم 16).
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+/// نوع الحساب المالي (قسمان 8 و9).
+enum AccountType {
+  CASH
+  BANK
+  E_WALLET
+  CUSTOM
+}
+
+/// التصنيف: رئيسي أم بند فرعي.
+enum CategoryKind {
+  MAIN
+  SUB
+}
+
+/// جهة الاتصال: عميل أم مورد.
+enum ContactKind {
+  CUSTOMER
+  SUPPLER
+}
+
+/// اتجاه الدين: مستحق لنا أم مستحق علينا.
+enum DebtDirection {
+  RECEIVABLE
+  PAYABLE
+}
+
+/// حالة الدين.
+enum DebtStatus {
+  OPEN
+  PARTIALLY_SETTLED
+  SETTLED
+  WRITTEN_OFF
+  REVERSED
+}
+
+/// نوع العملية المالية (أقسام 8 و9 و10).
+enum TransactionKind {
+  INCOME
+  EXPENSE
+  SALE_CASH
+  SALE_CREDIT
+  PURCHASE_CASH
+  PURCHASE_CREDIT
+  COLLECTION
+  PAYMENT
+  TRANSFER
+}
+
+/// طريقة احتساب التحويل الداخلي — الخيارات الأربعة.
+enum TransferTreatment {
+  /// بلا أثر نقدي: الطرفان فقط، بلا قيد صرف.
+  NONE
+  /// قيد صرف مقابل كل طرف، بلا نتيجة نقدية.
+  EXPLICIT_FX
+  /// فرق التحويل يُقيَّد تلقائيًا كدخل أو مصروف.
+  IMPLICIT_FX
+  /// الطرفان، ويُقيَّد فرق التحويل مدخلًا مستقلًا بحسب الاتجاه.
+  SEPARATE_FX
+}
+
+/// مصدر الإدخال (قسم 20).
+enum InputSource {
+  MANUAL
+  VOICE
+}
+
+/// حالة المسودة.
+enum DraftStatus {
+  DRAFT
+  SUBMITTED
+  CONFIRMED
+  POSTED
+  REJECTED
+  EXPIRED
+}
+
+/// حالة القيد المعتمد.
+enum EntryStatus {
+  POSTED
+  REVERSED
+}
+
+/// أي نوع من التغييرات المسجَّلة في سجل التدقيق.
+enum AuditAction {
+  CREATE
+  UPDATE
+  ARCHIVE
+  REVERSE
+  CONFIRM
+  POST
+  DELETE_ATTEMPT_BLOCKED
+}
+
+/// حالة المستخدم.
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+/// دورة الاشتراك (قسم 5).
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+}
+
+/// حالة الاشتراك.
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  EXPIRED
+  CANCELLED
+}
+
+/// الميزانية: وارد أم صادر (قسم 14).
+enum BudgetFlow {
+  INCOME
+  EXPENSE
+}
+
+/// نوع حدّ الميزانية: مبلغ ثابت أم نسبة.
+enum BudgetLimitType {
+  FIXED_AMOUNT
+  PERCENTAGE
+}
+
+/// فترة الميزانية (قسم 14).
+enum BudgetPeriodType {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+  CUSTOM
+}
+
+/// حالة فترة الميزانية.
+enum BudgetPeriodStatus {
+  OPEN
+  CLOSED
+}
+
+/// نوع التنبيه: رقمي أم نسبي.
+enum AlertThresholdType {
+  NUMERIC
+  PERCENTAGE
+}
+
+/// هل يُطلق التنبيه عند بلوغ الحد أم عند تجاوزه.
+enum AlertTrigger {
+  REACH
+  EXCEED
+}
+
+/// حالة حدث التنبيه.
+enum AlertEventStatus {
+  TRIGGERED
+  ACKNOWLEDGED
+  DISMISSED
+}
+
+/// أساس حساب نسبة الميزانية: نسبة من ماذا.
+enum BudgetPercentBasis {
+  OF_TOTAL_INCOME
+  OF_TOTAL_EXPENSE
+}
+
+/// منتج أم خدمة (قسم 11). الخدمة لا تلمس المخزون.
+enum ProductKind {
+  GOOD
+  SERVICE
+}
+
+/// نوع حركة المخزون.
+enum StockMovementType {
+  PURCHASE
+  SALE
+  RETURN_IN
+  RETURN_OUT
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+}
+
+/// حالة التسجيل الصوتي.
+enum AudioStatus {
+  UPLOADED
+  TRANSCRIBING
+  TRANSCRIBED
+  PARSED
+  FAILED
+  DISCARDED
+}
+
+/// حالة مهمة التفريغ.
+enum TranscriptionStatus {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+/// نوع التقرير (قسم 23).
+enum ReportType {
+  HOUSEHOLD_DETAILED
+  BUSINESS_DETAILED
+  PROFIT_AND_LOSS
+  BUDGET_USAGE
+  BUDGET_REMAINING
+  BUDGET_ALERTS
+  BUDGET_CARRY_FORWARD
+  DEBT_AGING
+  STOCK_REPORT
+}
+
+/// حالة طلب التقرير.
+enum ReportRequestStatus {
+  QUEUED
+  RUNNING
+  READY
+  FAILED
+  EXPIRED
+}
+
+/// حالة توكن المشاركة.
+enum ShareTokenStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+/// نوع الإشعار.
+enum NotificationType {
+  BUDGET_ALERT
+  SUBSCRIPTION_EXPIRING
+  INVITATION
+  REPORT_READY
+  STOCK_LOW
+  DEBT_DUE
+}
+
+/// حالة الإشعار.
+enum NotificationStatus {
+  UNREAD
+  READ
+  ARCHIVED
+}
+
+/// مصدر سعر الصرف (قسم 15).
+enum ExchangeRateSource {
+  MANUAL
+  PROVIDER_API
+  LEDGER_DEFAULT
+}
+
+/// حالة الملف المخزَّن.
+enum FileStatus {
+  PENDING
+  READY
+  FAILED
+  QUARANTINED
+}
+
+/// حالة الإيصال.
+enum ReceiptStatus {
+  UPLOADED
+  PROCESSING
+  EXTRACTED
+  LINKED
+  FAILED
+}
+
+// ============================================================================
+// الدولة والعملة
+// ============================================================================
+
+/// دولة من كل دول العالم. لا دولة افتراضية على المستخدم (قسم 3).
+model Country {
+  id                String    @id @default(uuid()) @db.Uuid
+  iso2              String    @unique @db.Char(2)
+  iso3              String    @unique @db.Char(3)
+  nameEn            String    @db.VarChar(120)
+  nameAr            String    @db.VarChar(120)
+  /// عملة العرض الافتراضية للبلد؛ عدّة دول تتشارك العملة نفسها.
+  defaultCurrencyId String?   @db.Uuid
+  defaultCurrency   Currency? @relation("CountryDefaultCurrency", fields: [defaultCurrencyId], references: [id], onDelete: SetNull)
+  isActive          Boolean   @default(true)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(3)
+
+  users    User[]
+  ledgers  Ledger[]
+  taxRates TaxRate[]
+
+  @@index([isActive])
+  @@map("countries")
+}
+
+/// عملة من كل العملات. منفصلة عن عملة تسعير الاشتراك الثابتة USD (قسم 6).
+model Currency {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique @db.Char(3)
+  nameEn    String   @db.VarChar(120)
+  nameAr    String   @db.VarChar(120)
+  /// عدد الخانات العشرية، لإعداد العرض لا للتخزين.
+  minorUnit Int      @default(2)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  defaultForCountries           Country[]          @relation("CountryDefaultCurrency")
+  baseLedgers                   Ledger[]           @relation("LedgerBaseCurrency")
+  accountCurrencies             FinancialAccount[]
+  budgetCurrencies              Budget[]
+  contactCurrencies             Contact[]
+  debtCurrencies                Debt[]
+  debtBaseCurrencies            Debt[]             @relation("DebtBaseCurrency")
+  productCurrencies             Product[]
+  warehouseCurrencies           Warehouse[]
+  taxRateCurrencies             TaxRate[]
+  planPriceBaseCurrencies       PlanPrice[]        @relation("PlanPriceBaseCurrency")
+  planPriceDisplayCurrencies    PlanPrice[]        @relation("PlanPriceDisplayCurrency")
+  subscriptionBaseCurrencies    Subscription[]     @relation("SubscriptionBaseCurrency")
+  subscriptionDisplayCurrencies Subscription[]     @relation("SubscriptionDisplayCurrency")
+  draftTransactionCurrencies    DraftTransaction[] @relation("DraftTransactionCurrency")
+  draftBaseCurrencies           DraftTransaction[] @relation("DraftBaseCurrency")
+  entryOriginalCurrencies       JournalEntry[]     @relation("EntryOriginalCurrency")
+  entryBaseCurrencies           JournalEntry[]     @relation("EntryBaseCurrency")
+  lineCurrencies                JournalLine[]      @relation("JournalLineCurrency")
+  lineBaseCurrencies            JournalLine[]      @relation("JournalLineBaseCurrency")
+
+  @@index([isActive])
+  @@map("currencies")
+}
+
+// ============================================================================
+// الهوية والاشتراك
+// ============================================================================
+
+/// مستخدم للمنصة. سجله لا يُحذف لما يحمله من أثر مالي (قسم 26).
+model User {
+  id              String     @id @default(uuid()) @db.Uuid
+  email           String     @unique @db.VarChar(320)
+  emailVerifiedAt DateTime?  @db.Timestamptz(3)
+  displayName     String?    @db.VarChar(160)
+  passwordHash    String?    @db.VarChar(255)
+  locale          String     @default("ar") @db.VarChar(5)
+  countryId       String?    @db.Uuid
+  country         Country?   @relation(fields: [countryId], references: [id], onDelete: SetNull)
+  /// المالك الأعلى واحد فقط لكل حساب مشترك (قسم 17).
+  isTopOwner      Boolean    @default(false)
+  status          UserStatus @default(ACTIVE)
+  archivedAt      DateTime?  @db.Timestamptz(3)
+  lastLoginAt     DateTime?  @db.Timestamptz(3)
+  createdAt       DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime   @updatedAt @db.Timestamptz(3)
+
+  sessions           UserSession[]
+  subscriptions      Subscription[]
+  ownedLedgers       Ledger[]                 @relation("LedgerOwner")
+  memberships        LedgerMember[]
+  grantedPermissions LedgerMemberPermission[] @relation("MemberPermissionGrantedBy")
+  sentInvitations    Invitation[]             @relation("InvitationInviter")
+  qrInvitations      QrInvitation[]
+  createdDrafts      DraftTransaction[]       @relation("DraftCreatedBy")
+  postedEntries      JournalEntry[]           @relation("EntryPostedBy")
+  transactionAudits  TransactionAuditLog[]
+  auditReviews       TransactionAuditLog[]    @relation("TransactionAuditReviewer")
+  uploadedFiles      FileObject[]             @relation("FileUploadedBy")
+  uploadedReceipts   Receipt[]                @relation("ReceiptUploadedBy")
+  audioConsents      AudioConsent[]
+  audioRecordings    AudioRecording[]
+  reportRequests     ReportRequest[]
+  createdTokens      ReportToken[]
+  revokedTokens      RevokedReportToken[]     @relation("ReportTokenRevokedBy")
+  notifications      Notification[]
+  pushSubscriptions  PushSubscription[]
+  auditLogs          AuditLog[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@index([countryId])
+  @@index([status, archivedAt])
+  @@map("users")
+}
+
+/// جلسة دخول. يُسجَّل الإبطال بدل الحذف.
+model UserSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// يُخزَّن hash فقط، لا الرمز الخام.
+  tokenHash  String    @unique @db.VarChar(128)
+  userAgent  String?   @db.VarChar(400)
+  ipAddress  String?   @db.VarChar(45)
+  expiresAt  DateTime  @db.Timestamptz(3)
+  revokedAt  DateTime? @db.Timestamptz(3)
+  lastSeenAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+/// رمز استعادة كلمة المرور: يُخزَّن hash فقط، ويُستهلك مرة واحدة (TASK-029).
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique @db.VarChar(128)
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  revokedAt DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([userId, usedAt, revokedAt])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+/// باقة اشتراك المنصة. التسعير الأساسي بالدولار دائمًا (قسم 6).
+model Plan {
+  id            String   @id @default(uuid()) @db.Uuid
+  code          String   @unique @db.VarChar(50)
+  nameEn        String   @db.VarChar(120)
+  nameAr        String   @db.VarChar(120)
+  descriptionEn String?  @db.VarChar(500)
+  descriptionAr String?  @db.VarChar(500)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  prices        PlanPrice[]
+  subscriptions Subscription[]
+
+  @@index([isActive])
+  @@map("plans")
+}
+
+/// سعر الباقة: يُخزَّن بالدولار، ويُعرض بعملة المستخدم مع إظهار الأصل (قسم 6).
+model PlanPrice {
+  id                   String              @id @default(uuid()) @db.Uuid
+  planId               String              @db.Uuid
+  plan                 Plan                @relation(fields: [planId], references: [id], onDelete: Restrict)
+  billingCycle         BillingCycle
+  /// السعر في عملة التسعير الأساسية USD.
+  basePriceAmount      Decimal             @db.Decimal(20, 4)
+  baseCurrencyId       String              @db.Uuid
+  baseCurrency         Currency            @relation("PlanPriceBaseCurrency", fields: [baseCurrencyId], references: [id], onDelete: Restrict)
+  /// اختياري: سعر معروض بعملة محددة.
+  displayAmount        Decimal?            @db.Decimal(20, 4)
+  displayCurrencyId    String?             @db.Uuid
+  displayCurrency      Currency?           @relation("PlanPriceDisplayCurrency", fields: [displayCurrencyId], references: [id], onDelete: SetNull)
+  displayRate          Decimal?            @db.Decimal(24, 12)
+  displayRateSource    ExchangeRateSource?
+  displayRateFetchedAt DateTime?           @db.Timestamptz(3)
+  createdAt            DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime            @updatedAt @db.Timestamptz(3)
+
+  subscriptions Subscription[]
+
+  @@unique([planId, billingCycle, displayCurrencyId])
+  @@index([baseCurrencyId])
+  @@map("plan_prices")
+}
+
+/// اشتراك مستخدم في باقة. منفصل تمامًا عن المال داخل الدفاتر.
+model Subscription {
+  id                 String             @id @default(uuid()) @db.Uuid
+  userId             String             @db.Uuid
+  user               User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  planId             String             @db.Uuid
+  plan               Plan               @relation(fields: [planId], references: [id], onDelete: Restrict)
+  planPriceId        String?            @db.Uuid
+  planPrice          PlanPrice?         @relation(fields: [planPriceId], references: [id], onDelete: SetNull)
+  status             SubscriptionStatus @default(TRIALING)
+  billingCycle       BillingCycle
+  /// الدفع وهمي في المرحلة الحالية (قسم 5).
+  isPaymentSimulated Boolean            @default(true)
+  basePriceAmount    Decimal            @db.Decimal(20, 4)
+  baseCurrencyId     String             @db.Uuid
+  baseCurrency       Currency           @relation("SubscriptionBaseCurrency", fields: [baseCurrencyId], references: [id], onDelete: Restrict)
+  displayAmount      Decimal?           @db.Decimal(20, 4)
+  displayCurrencyId  String?            @db.Uuid
+  displayCurrency    Currency?          @relation("SubscriptionDisplayCurrency", fields: [displayCurrencyId], references: [id], onDelete: SetNull)
+  displayRate        Decimal?           @db.Decimal(24, 12)
+  startedAt          DateTime           @db.Timestamptz(3)
+  currentPeriodStart DateTime           @db.Timestamptz(3)
+  currentPeriodEnd   DateTime           @db.Timestamptz(3)
+  cancelledAt        DateTime?          @db.Timestamptz(3)
+  endedAt            DateTime?          @db.Timestamptz(3)
+  createdAt          DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime           @updatedAt @db.Timestamptz(3)
+
+  @@index([userId, status])
+  @@index([currentPeriodEnd])
+  @@map("subscriptions")
+}
+
+// ============================================================================
+// الدفاتر والعضوية والدعوات
+// ============================================================================
+
+/// دفتر عائلي أو تجاري. النوع ثابت بعد الإنشاء (قسم 7).
+model Ledger {
+  id                       String            @id @default(uuid()) @db.Uuid
+  name                     String            @db.VarChar(160)
+  type                     LedgerType
+  status                   LedgerStatus      @default(ACTIVE)
+  /// مالك الدفتر.
+  ownerId                  String            @db.Uuid
+  owner                    User              @relation("LedgerOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  /// دولة الدفتر، تختلف عن دولة المستخدم (قسم 3).
+  countryId                String            @db.Uuid
+  country                  Country           @relation(fields: [countryId], references: [id], onDelete: Restrict)
+  /// العملة الأساسية للدفتر، تُضبط عند الإنشاء (قسمان 4 و7).
+  baseCurrencyId           String            @db.Uuid
+  baseCurrency             Currency          @relation("LedgerBaseCurrency", fields: [baseCurrencyId], references: [id], onDelete: Restrict)
+  /// المنطقة الزمنية، تُستخدم لحساب businessDate.
+  timezone                 String            @default("UTC") @db.VarChar(64)
+  /// الميزانيات اختيارية لكل دفتر (قسم 14).
+  budgetsEnabled           Boolean           @default(false)
+  /// المخزون اختياري (قسم 12).
+  stockEnabled             Boolean           @default(false)
+  /// الضرائب اختيارية (قسم 13).
+  taxEnabled               Boolean           @default(false)
+  defaultTransferTreatment TransferTreatment @default(NONE)
+  archivedAt               DateTime?         @db.Timestamptz(3)
+  createdAt                DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime          @updatedAt @db.Timestamptz(3)
+
+  memberships       LedgerMember[]
+  invitations       Invitation[]
+  qrInvitations     QrInvitation[]
+  accounts          FinancialAccount[]
+  categories        Category[]
+  budgets           Budget[]
+  drafts            DraftTransaction[]
+  entries           JournalEntry[]
+  entryLines        JournalLine[]
+  entryAudits       TransactionAuditLog[]
+  contacts          Contact[]
+  debts             Debt[]
+  products          Product[]
+  warehouses        Warehouse[]
+  stockMovements    StockMovement[]
+  taxRates          TaxRate[]
+  audioRecordings   AudioRecording[]
+  reportRequests    ReportRequest[]
+  files             FileObject[]
+  receipts          Receipt[]
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
+
+  @@index([ownerId, status])
+  @@index([type, status, archivedAt])
+  @@map("ledgers")
+}
+
+/// عضوية مستخدم في دفتر.
+model LedgerMember {
+  id         String           @id @default(uuid()) @db.Uuid
+  ledgerId   String           @db.Uuid
+  ledger     Ledger           @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  userId     String           @db.Uuid
+  user       User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  status     MembershipStatus @default(ACTIVE)
+  invitedAt  DateTime?        @db.Timestamptz(3)
+  joinedAt   DateTime?        @db.Timestamptz(3)
+  archivedAt DateTime?        @db.Timestamptz(3)
+  createdAt  DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime         @updatedAt @db.Timestamptz(3)
+
+  permissions LedgerMemberPermission[]
+
+  @@unique([ledgerId, userId])
+  @@index([userId, status])
+  @@map("ledger_members")
+}
+
+/// صلاحية ممنوحة لعضو داخل دفتر واحد فقط (قسم 16).
+model LedgerMemberPermission {
+  id          String       @id @default(uuid()) @db.Uuid
+  memberId    String       @db.Uuid
+  member      LedgerMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  permission  Permission
+  grantedAt   DateTime     @default(now()) @db.Timestamptz(3)
+  grantedById String?      @db.Uuid
+  grantedBy   User?        @relation("MemberPermissionGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
+  revokedAt   DateTime?    @db.Timestamptz(3)
+
+  @@unique([memberId, permission])
+  @@index([permission])
+  @@map("ledger_member_permissions")
+}
+
+/// دعوة مستخدم مرتبط عبر البريد (قسم 16).
+model Invitation {
+  id          String           @id @default(uuid()) @db.Uuid
+  ledgerId    String           @db.Uuid
+  ledger      Ledger           @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  inviterId   String           @db.Uuid
+  inviter     User             @relation("InvitationInviter", fields: [inviterId], references: [id], onDelete: Restrict)
+  email       String           @db.VarChar(320)
+  /// يُخزَّن hash فقط، لا الرمز الخام.
+  tokenHash   String           @unique @db.VarChar(128)
+  status      InvitationStatus @default(PENDING)
+  permissions Permission[]
+  expiresAt   DateTime         @db.Timestamptz(3)
+  usedAt      DateTime?        @db.Timestamptz(3)
+  revokedAt   DateTime?        @db.Timestamptz(3)
+  createdAt   DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime         @updatedAt @db.Timestamptz(3)
+
+  @@index([ledgerId, status])
+  @@index([email, status])
+  @@map("invitations")
+}
+
+/// دعوة QR آمنة: رمز قصير العمر، استعمال واحد، ولا يحمل صلاحية بذاته.
+model QrInvitation {
+  id                  String           @id @default(uuid()) @db.Uuid
+  ledgerId            String           @db.Uuid
+  ledger              Ledger           @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  createdById         String           @db.Uuid
+  createdBy           User             @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  /// hash للرمز القصير؛ لا يُخزَّن أي حمولة موقّعة غير قابلة للإبطال.
+  tokenHash           String           @unique @db.VarChar(128)
+  /// صلاحية مقترحة تُطبَّق بعد القبول، لا قبله.
+  suggestedPermission Permission?
+  status              InvitationStatus @default(PENDING)
+  /// مدة الصلاحية بالثواني (افتراضي 300 ثانية).
+  ttlSeconds          Int              @default(300)
+  maxUses             Int              @default(1)
+  useCount            Int              @default(0)
+  issuedAt            DateTime         @default(now()) @db.Timestamptz(3)
+  expiresAt           DateTime         @db.Timestamptz(3)
+  usedAt              DateTime?        @db.Timestamptz(3)
+  revokedAt           DateTime?        @db.Timestamptz(3)
+  createdAt           DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime         @updatedAt @db.Timestamptz(3)
+
+  @@index([ledgerId, status])
+  @@index([expiresAt])
+  @@map("qr_invitations")
+}
+
+// ============================================================================
+// الحسابات والتصنيفات
+// ============================================================================
+
+/// حساب مالي داخل دفتر: نقدي أو بنكي أو محفظة إلكترونية أو مخصص (قسمان 8 و9).
+model FinancialAccount {
+  id                    String      @id @default(uuid()) @db.Uuid
+  ledgerId              String      @db.Uuid
+  ledger                Ledger      @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  name                  String      @db.VarChar(160)
+  type                  AccountType
+  currencyId            String      @db.Uuid
+  currency              Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  /// حساب الطرف المقابل في التحويلات الداخلية.
+  isTransferCounterpart Boolean     @default(false)
+  /// الأرشفة بدل الحذف بعد الاستخدام (قسم 26).
+  archivedAt            DateTime?   @db.Timestamptz(3)
+  createdAt             DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime    @updatedAt @db.Timestamptz(3)
+
+  journalLines         JournalLine[]
+  draftLines           DraftLine[]
+  draftsAsCounterparty DraftTransaction[] @relation("DraftCounterparty")
+
+  @@index([ledgerId, archivedAt])
+  @@index([ledgerId, type])
+  @@map("financial_accounts")
+}
+
+/// تصنيف رئيسي (kind = MAIN) أو بند فرعي (kind = SUB) تحت تصنيف رئيسي.
+model Category {
+  id           String       @id @default(uuid()) @db.Uuid
+  ledgerId     String       @db.Uuid
+  ledger       Ledger       @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  kind         CategoryKind @default(MAIN)
+  parentId     String?      @db.Uuid
+  parent       Category?    @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children     Category[]   @relation("CategoryTree")
+  name         String       @db.VarChar(160)
+  /// اللون والأيقونة للتصنيف الرئيسي فقط.
+  colorHex     String?      @db.Char(7)
+  iconKey      String?      @db.VarChar(60)
+  /// مفتاح ثابت عالمي لمورّد التصنيفات؛ فريد داخل الدفتر.
+  systemKey    String?      @db.VarChar(60)
+  /// الميزانيات والنسب تُحسب على التصنيف الرئيسي.
+  isBudgetable Boolean      @default(true)
+  archivedAt   DateTime?    @db.Timestamptz(3)
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime     @updatedAt @db.Timestamptz(3)
+
+  items        CategoryItem[]
+  budgets      Budget[]
+  journalLines JournalLine[]
+  draftLines   DraftLine[]
+
+  @@unique([ledgerId, systemKey])
+  @@index([ledgerId, kind, archivedAt])
+  @@index([parentId])
+  @@map("categories")
+}
+
+/// بند فرعي تحت تصنيف رئيسي. لا يقبل فرعًا تحته.
+model CategoryItem {
+  id           String    @id @default(uuid()) @db.Uuid
+  categoryId   String    @db.Uuid
+  category     Category  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  name         String    @db.VarChar(160)
+  systemKey    String?   @db.VarChar(60)
+  isBudgetable Boolean   @default(true)
+  archivedAt   DateTime? @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
+
+  budgets      Budget[]
+  journalLines JournalLine[]
+  draftLines   DraftLine[]
+
+  @@unique([categoryId, systemKey])
+  @@index([categoryId, archivedAt])
+  @@map("category_items")
+}
+
+// ============================================================================
+// الميزانيات والتنبيهات (قسم 14 — معتمدة بـ D-006)
+// ============================================================================
+
+/// ميزانية داخل دفتر. اختيارية تمامًا؛ التشغيل على مستوى الدفتر عبر budgetsEnabled.
+model Budget {
+  id                  String              @id @default(uuid()) @db.Uuid
+  ledgerId            String              @db.Uuid
+  ledger              Ledger              @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  name                String              @db.VarChar(160)
+  /// وارد أم صادر.
+  flow                BudgetFlow
+  periodType          BudgetPeriodType
+  limitType           BudgetLimitType
+  /// الحد الثابت: قيمة مطلقة في عملة الدفتر الأساسية.
+  fixedAmount         Decimal?            @db.Decimal(20, 4)
+  /// الحد النسبي: قيمة النسبة المئوية.
+  percentValue        Decimal?            @db.Decimal(9, 4)
+  /// أساس حساب النسبة: نسبة من ماذا.
+  percentBasis        BudgetPercentBasis?
+  currencyId          String?             @db.Uuid
+  currency            Currency?           @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  /// ربط اختياري: بدفتر كامل، أو بتصنيف رئيسي، أو ببند فرعي — لا يُشترط أكثر من واحد.
+  categoryId          String?             @db.Uuid
+  category            Category?           @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  categoryItemId      String?             @db.Uuid
+  categoryItem        CategoryItem?       @relation(fields: [categoryItemId], references: [id], onDelete: Restrict)
+  /// تكرار تلقائي لتوليد الفترات.
+  autoRenew           Boolean             @default(true)
+  /// ترحيل اختياري للمتبقي إلى الفترة التالية.
+  carryForwardEnabled Boolean             @default(false)
+  isActive            Boolean             @default(true)
+  archivedAt          DateTime?           @db.Timestamptz(3)
+  createdAt           DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime            @updatedAt @db.Timestamptz(3)
+
+  periods    BudgetPeriod[]
+  alertRules AlertRule[]
+
+  @@index([ledgerId, isActive, archivedAt])
+  @@index([ledgerId, flow, periodType])
+  @@index([categoryId])
+  @@index([categoryItemId])
+  @@map("budgets")
+}
+
+/// فترة ميزانية مولَّدة: يومية أو أسبوعية أو شهرية أو سنوية أو مخصصة.
+model BudgetPeriod {
+  id              String             @id @default(uuid()) @db.Uuid
+  budgetId        String             @db.Uuid
+  budget          Budget             @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  periodType      BudgetPeriodType
+  periodStart     DateTime           @db.Date
+  periodEnd       DateTime           @db.Date
+  /// الحد الفعال لهذه الفترة بعد الترحيل.
+  effectiveLimit  Decimal            @db.Decimal(20, 4)
+  /// قيمة مُرحَّلة من فترة سابقة.
+  carriedInAmount Decimal            @default(0) @db.Decimal(20, 4)
+  amountSpent     Decimal            @default(0) @db.Decimal(20, 4)
+  status          BudgetPeriodStatus @default(OPEN)
+  isAutoGenerated Boolean            @default(false)
+  closedAt        DateTime?          @db.Timestamptz(3)
+  createdAt       DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime           @updatedAt @db.Timestamptz(3)
+
+  alertEvents AlertEvent[]
+
+  @@unique([budgetId, periodStart, periodEnd])
+  @@index([periodStart, periodEnd, status])
+  @@map("budget_periods")
+}
+
+/// قاعدة تنبيه: رقمية (حدّ مبلغ) أو نسبية (حدّ نسبة).
+model AlertRule {
+  id               String             @id @default(uuid()) @db.Uuid
+  budgetId         String             @db.Uuid
+  budget           Budget             @relation(fields: [budgetId], references: [id], onDelete: Restrict)
+  name             String             @db.VarChar(160)
+  thresholdType    AlertThresholdType
+  numericThreshold Decimal?           @db.Decimal(20, 4)
+  percentThreshold Decimal?           @db.Decimal(9, 4)
+  triggerOn        AlertTrigger       @default(REACH)
+  enabled          Boolean            @default(true)
+  createdAt        DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime           @updatedAt @db.Timestamptz(3)
+
+  events AlertEvent[]
+
+  @@index([budgetId, enabled])
+  @@map("alert_rules")
+}
+
+/// حدث تنبيه فعلي. إشعار لا يمنع العملية.
+model AlertEvent {
+  id              String           @id @default(uuid()) @db.Uuid
+  ruleId          String           @db.Uuid
+  rule            AlertRule        @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+  budgetPeriodId  String           @db.Uuid
+  budgetPeriod    BudgetPeriod     @relation(fields: [budgetPeriodId], references: [id], onDelete: Restrict)
+  observedAmount  Decimal          @db.Decimal(20, 4)
+  thresholdAmount Decimal          @db.Decimal(20, 4)
+  status          AlertEventStatus @default(TRIGGERED)
+  triggeredAt     DateTime         @default(now()) @db.Timestamptz(3)
+  acknowledgedAt  DateTime?        @db.Timestamptz(3)
+  dismissedAt     DateTime?        @db.Timestamptz(3)
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+
+  notifications Notification[]
+
+  @@index([ruleId, triggeredAt])
+  @@index([budgetPeriodId, status])
+  @@map("alert_events")
+}
+
+// ============================================================================
+// المسودات (قسمان 20 و21)
+// ============================================================================
+
+/// مسودة عملية. ناتج الإدخال اليدوي أو الصوتي، وليست قيدًا معتمدًا.
+model DraftTransaction {
+  id                       String              @id @default(uuid()) @db.Uuid
+  ledgerId                 String              @db.Uuid
+  ledger                   Ledger              @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  status                   DraftStatus         @default(DRAFT)
+  kind                     TransactionKind
+  source                   InputSource         @default(MANUAL)
+  description              String?             @db.VarChar(500)
+  /// وقت حدوث العملية.
+  occurredAt               DateTime            @db.Timestamptz(3)
+  /// التاريخ المستخدم في التقارير؛ قد يختلف عن occurredAt.
+  businessDate             DateTime            @db.Date
+  /// العملة الأصلية للعملية.
+  originalCurrencyId       String              @db.Uuid
+  originalCurrency         Currency            @relation("DraftTransactionCurrency", fields: [originalCurrencyId], references: [id], onDelete: Restrict)
+  originalAmount           Decimal             @db.Decimal(20, 4)
+  originalAmountIsNegative Boolean             @default(false)
+  /// عملة الدفتر الأساسية.
+  baseCurrencyId           String              @db.Uuid
+  baseCurrency             Currency            @relation("DraftBaseCurrency", fields: [baseCurrencyId], references: [id], onDelete: Restrict)
+  baseAmount               Decimal             @db.Decimal(20, 4)
+  exchangeRate             Decimal?            @db.Decimal(24, 12)
+  exchangeRateSource       ExchangeRateSource?
+  exchangeRateFetchedAt    DateTime?           @db.Timestamptz(3)
+  /// تحذير عند اختلاف السعر المستخدم عن المرجع وقت الاعتماد.
+  fxDriftWarning           Boolean             @default(false)
+  fxDriftPercent           Decimal?            @db.Decimal(9, 4)
+  /// طريقة احتساب التحويل الداخلي.
+  transferTreatment        TransferTreatment   @default(NONE)
+  counterpartyAccountId    String?             @db.Uuid
+  counterpartyAccount      FinancialAccount?   @relation("DraftCounterparty", fields: [counterpartyAccountId], references: [id], onDelete: Restrict)
+  /// منع تكرار العملية ضمن نطاق الدفتر.
+  idempotencyKey           String?             @db.VarChar(120)
+  clientId                 String?             @db.VarChar(120)
+  /// عند وجود صوت، تُربط المسودة بمصدره (قسم 20).
+  audioRecordingId         String?             @db.Uuid
+  audioRecording           AudioRecording?     @relation(fields: [audioRecordingId], references: [id], onDelete: SetNull)
+  contactId                String?             @db.Uuid
+  contact                  Contact?            @relation("DraftContact", fields: [contactId], references: [id], onDelete: Restrict)
+  productId                String?             @db.Uuid
+  product                  Product?            @relation("DraftProduct", fields: [productId], references: [id], onDelete: Restrict)
+  quantity                 Decimal?            @db.Decimal(18, 6)
+  taxRateId                String?             @db.Uuid
+  taxRate                  TaxRate?            @relation("DraftTaxRate", fields: [taxRateId], references: [id], onDelete: Restrict)
+  taxAmount                Decimal?            @db.Decimal(20, 4)
+  createdById              String              @db.Uuid
+  createdBy                User                @relation("DraftCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  /// الطوابع الزمنية (قسم 22).
+  submittedAt              DateTime?           @db.Timestamptz(3)
+  confirmedAt              DateTime?           @db.Timestamptz(3)
+  rejectedAt               DateTime?           @db.Timestamptz(3)
+  postedEntryId            String?             @unique @db.Uuid
+  postedEntry              JournalEntry?       @relation("DraftPostedEntry", fields: [postedEntryId], references: [id], onDelete: SetNull)
+  expiresAt                DateTime?           @db.Timestamptz(3)
+  createdAt                DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime            @updatedAt @db.Timestamptz(3)
+
+  lines      DraftLine[]
+  reviewLogs TransactionAuditLog[]
+
+  @@unique([ledgerId, idempotencyKey])
+  @@unique([ledgerId, clientId])
+  @@index([ledgerId, status, businessDate])
+  @@index([ledgerId, kind, businessDate])
+  @@index([businessDate])
+  @@index([contactId])
+  @@index([createdById, createdAt])
+  @@index([audioRecordingId])
+  @@map("draft_transactions")
+}
+
+/// سطر مسودة: قيد مبسّط قبل الاعتماد.
+model DraftLine {
+  id             String            @id @default(uuid()) @db.Uuid
+  draftId        String            @db.Uuid
+  draft          DraftTransaction  @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  direction      LineDirection
+  accountId      String?           @db.Uuid
+  account        FinancialAccount? @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  categoryId     String?           @db.Uuid
+  category       Category?         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  categoryItemId String?           @db.Uuid
+  categoryItem   CategoryItem?     @relation(fields: [categoryItemId], references: [id], onDelete: Restrict)
+  amount         Decimal           @db.Decimal(20, 4)
+  baseAmount     Decimal           @db.Decimal(20, 4)
+  memo           String?           @db.VarChar(300)
+  createdAt      DateTime          @default(now()) @db.Timestamptz(3)
+
+  @@index([draftId])
+  @@index([categoryId])
+  @@index([categoryItemId])
+  @@map("draft_lines")
+}
+
+// ============================================================================
+// القيود المحاسبية (قسم 26: لا حذف، والتصحيح بالعكس)
+// ============================================================================
+
+/// قيد معتمد. لا يُحذف ولا يُعدَّل؛ التصحيح بقيد عكسي.
+model JournalEntry {
+  id                    String              @id @default(uuid()) @db.Uuid
+  ledgerId              String              @db.Uuid
+  ledger                Ledger              @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  /// رقم تسلسلي داخل الدفتر للعرض المرجعي، لا مرجع عمل.
+  sequenceNumber        Int
+  status                EntryStatus         @default(POSTED)
+  kind                  TransactionKind
+  description           String?             @db.VarChar(500)
+  /// وقت حدوث العملية.
+  occurredAt            DateTime            @db.Timestamptz(3)
+  /// التاريخ المستخدم في التقارير.
+  businessDate          DateTime            @db.Date
+  originalCurrencyId    String?             @db.Uuid
+  originalCurrency      Currency?           @relation("EntryOriginalCurrency", fields: [originalCurrencyId], references: [id], onDelete: Restrict)
+  originalAmount        Decimal?            @db.Decimal(20, 4)
+  exchangeRate          Decimal?            @db.Decimal(24, 12)
+  exchangeRateSource    ExchangeRateSource?
+  exchangeRateFetchedAt DateTime?           @db.Timestamptz(3)
+  baseAmount            Decimal             @db.Decimal(20, 4)
+  baseCurrencyId        String              @db.Uuid
+  baseCurrency          Currency            @relation("EntryBaseCurrency", fields: [baseCurrencyId], references: [id], onDelete: Restrict)
+  transferTreatment     TransferTreatment   @default(NONE)
+  /// القيد العكسي لهذا القيد. فريد، فلا يُعكس القيد مرتين.
+  reversalOfId          String?             @unique @db.Uuid
+  reversalOf            JournalEntry?       @relation("EntryReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedByEntry       JournalEntry?       @relation("EntryReversal")
+  contactId             String?             @db.Uuid
+  contact               Contact?            @relation("EntryContact", fields: [contactId], references: [id], onDelete: Restrict)
+  /// منع تكرار العملية ضمن نطاق الدفتر.
+  idempotencyKey        String?             @db.VarChar(120)
+  clientId              String?             @db.VarChar(120)
+  postedById            String              @db.Uuid
+  postedBy              User                @relation("EntryPostedBy", fields: [postedById], references: [id], onDelete: Restrict)
+  postedAt              DateTime            @db.Timestamptz(3)
+  reversedAt            DateTime?           @db.Timestamptz(3)
+  createdAt             DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime            @updatedAt @db.Timestamptz(3)
+
+  lines           JournalLine[]
+  draftSource     DraftTransaction?     @relation("DraftPostedEntry")
+  audits          TransactionAuditLog[]
+  debtAllocations DebtAllocation[]
+  sourceDebts     Debt[]                @relation("DebtSourceEntry")
+  receipts        Receipt[]
+  stockMovements  StockMovement[]
+
+  @@unique([ledgerId, sequenceNumber])
+  @@unique([ledgerId, idempotencyKey])
+  @@unique([ledgerId, clientId])
+  @@index([ledgerId, status, businessDate])
+  @@index([ledgerId, kind, businessDate])
+  @@index([businessDate])
+  @@index([occurredAt])
+  @@index([contactId])
+  @@map("journal_entries")
+}
+
+/// سطر قيد معتمد. لا يُحذف؛ يُعكس بقيد كامل.
+model JournalLine {
+  id             String           @id @default(uuid()) @db.Uuid
+  /// مكرَّر على السطر لتسريع عزل الدفاتر وفهرسته.
+  ledgerId       String           @db.Uuid
+  ledger         Ledger           @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  entryId        String           @db.Uuid
+  entry          JournalEntry     @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  direction      LineDirection
+  accountId      String           @db.Uuid
+  account        FinancialAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  categoryId     String?          @db.Uuid
+  category       Category?        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  categoryItemId String?          @db.Uuid
+  categoryItem   CategoryItem?    @relation(fields: [categoryItemId], references: [id], onDelete: Restrict)
+  amount         Decimal          @db.Decimal(20, 4)
+  currencyId     String           @db.Uuid
+  currency       Currency         @relation("JournalLineCurrency", fields: [currencyId], references: [id], onDelete: Restrict)
+  baseAmount     Decimal          @db.Decimal(20, 4)
+  baseCurrencyId String           @db.Uuid
+  baseCurrency   Currency         @relation("JournalLineBaseCurrency", fields: [baseCurrencyId], references: [id], onDelete: Restrict)
+  exchangeRate   Decimal?         @db.Decimal(24, 12)
+  taxRateId      String?          @db.Uuid
+  taxRate        TaxRate?         @relation(fields: [taxRateId], references: [id], onDelete: Restrict)
+  memo           String?          @db.VarChar(300)
+  createdAt      DateTime         @default(now()) @db.Timestamptz(3)
+
+  @@index([entryId])
+  @@index([ledgerId, createdAt])
+  @@index([accountId, createdAt])
+  @@index([categoryId])
+  @@index([categoryItemId])
+  @@map("journal_lines")
+}
+
+/// سجل تدقيق على مستوى القيد: تغيّر أو عكس أو محاولة حذف مرفوضة.
+model TransactionAuditLog {
+  id         String            @id @default(uuid()) @db.Uuid
+  ledgerId   String            @db.Uuid
+  ledger     Ledger            @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  entryId    String?           @db.Uuid
+  entry      JournalEntry?     @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  draftId    String?           @db.Uuid
+  draft      DraftTransaction? @relation(fields: [draftId], references: [id], onDelete: Restrict)
+  action     AuditAction
+  /// اسم الحقل المتغيّر؛ القيمة السابقة في payload.
+  field      String?           @db.VarChar(80)
+  /// الفروق والقيم السابقة، بلا أسرار.
+  payload    Json?
+  actorId    String?           @db.Uuid
+  actor      User?             @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  reviewerId String?           @db.Uuid
+  reviewer   User?             @relation("TransactionAuditReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+  reason     String?           @db.VarChar(500)
+  createdAt  DateTime          @default(now()) @db.Timestamptz(3)
+
+  @@index([ledgerId, createdAt])
+  @@index([entryId, createdAt])
+  @@index([draftId, createdAt])
+  @@map("transaction_audit_logs")
+}
+
+// ============================================================================
+// العملاء والموردون والديون (قسمان 9 و10)
+// ============================================================================
+
+/// عميل أو مورد.
+model Contact {
+  id          String      @id @default(uuid()) @db.Uuid
+  ledgerId    String      @db.Uuid
+  ledger      Ledger      @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  kind        ContactKind
+  name        String      @db.VarChar(200)
+  email       String?     @db.VarChar(320)
+  phone       String?     @db.VarChar(40)
+  taxNumber   String?     @db.VarChar(60)
+  /// عملة تسوية الدين؛ تتبع عملة الدفتر افتراضيًا.
+  currencyId  String?     @db.Uuid
+  currency    Currency?   @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  creditLimit Decimal?    @db.Decimal(20, 4)
+  notes       String?     @db.VarChar(1000)
+  archivedAt  DateTime?   @db.Timestamptz(3)
+  createdAt   DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime    @updatedAt @db.Timestamptz(3)
+
+  debts   Debt[]
+  entries JournalEntry[]     @relation("EntryContact")
+  drafts  DraftTransaction[] @relation("DraftContact")
+
+  @@index([ledgerId, kind, archivedAt])
+  @@index([ledgerId, name])
+  @@map("contacts")
+}
+
+/// دين على عميل أو دين لمورد. يُفتح ويُسوّى بالقيود والتخصيصات، ولا يُحذف.
+model Debt {
+  id                 String              @id @default(uuid()) @db.Uuid
+  ledgerId           String              @db.Uuid
+  ledger             Ledger              @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  contactId          String              @db.Uuid
+  contact            Contact             @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  /// مستحق لنا (مبيعات آجلة) أم مستحق علينا (مشتريات آجلة).
+  direction          DebtDirection
+  status             DebtStatus          @default(OPEN)
+  /// القيد المنشئ للدين.
+  sourceEntryId      String              @db.Uuid
+  sourceEntry        JournalEntry        @relation("DebtSourceEntry", fields: [sourceEntryId], references: [id], onDelete: Restrict)
+  description        String?             @db.VarChar(500)
+  /// التاريخ المستخدم في التقارير وتقرير أعمار الديون.
+  businessDate       DateTime            @db.Date
+  originalAmount     Decimal             @db.Decimal(20, 4)
+  settledAmount      Decimal             @default(0) @db.Decimal(20, 4)
+  currencyId         String              @db.Uuid
+  currency           Currency            @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  baseAmount         Decimal             @db.Decimal(20, 4)
+  baseSettledAmount  Decimal             @default(0) @db.Decimal(20, 4)
+  baseCurrencyId     String              @db.Uuid
+  baseCurrency       Currency            @relation("DebtBaseCurrency", fields: [baseCurrencyId], references: [id], onDelete: Restrict)
+  exchangeRate       Decimal?            @db.Decimal(24, 12)
+  exchangeRateSource ExchangeRateSource?
+  dueDate            DateTime?           @db.Date
+  settledAt          DateTime?           @db.Timestamptz(3)
+  writtenOffAt       DateTime?           @db.Timestamptz(3)
+  /// عكس الدين؛ فريد، فلا يُعكس مرتين.
+  reversalOfId       String?             @unique @db.Uuid
+  reversalOf         Debt?               @relation("DebtReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedByEntry    Debt?               @relation("DebtReversal")
+  archivedAt         DateTime?           @db.Timestamptz(3)
+  createdAt          DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime            @updatedAt @db.Timestamptz(3)
+
+  allocations DebtAllocation[]
+
+  @@index([ledgerId, status, dueDate])
+  @@index([ledgerId, direction, status])
+  @@index([ledgerId, businessDate])
+  @@index([contactId, status])
+  @@map("debts")
+}
+
+/// تخصيص دفعة أو تحصيل على دين؛ يدعم الدفعات الجزئية.
+model DebtAllocation {
+  id              String          @id @default(uuid()) @db.Uuid
+  debtId          String          @db.Uuid
+  debt            Debt            @relation(fields: [debtId], references: [id], onDelete: Restrict)
+  /// الدفعة أو التحصيل المنشئ للتخصيص.
+  entryId         String          @db.Uuid
+  entry           JournalEntry    @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  amount          Decimal         @db.Decimal(20, 4)
+  baseAmount      Decimal         @db.Decimal(20, 4)
+  allocatedAt     DateTime        @default(now()) @db.Timestamptz(3)
+  /// عكس التخصيص بدل حذفه.
+  reversalOfId    String?         @unique @db.Uuid
+  reversalOf      DebtAllocation? @relation("AllocationReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedByEntry DebtAllocation? @relation("AllocationReversal")
+  createdAt       DateTime        @default(now()) @db.Timestamptz(3)
+
+  @@index([debtId, allocatedAt])
+  @@index([entryId])
+  @@map("debt_allocations")
+}
+
+// ============================================================================
+// المنتجات والمخزون والضرائب (أقسام 11 و12 و13)
+// ============================================================================
+
+/// منتج أو خدمة. الخدمة لا تلمس المخزون.
+model Product {
+  id                 String      @id @default(uuid()) @db.Uuid
+  ledgerId           String      @db.Uuid
+  ledger             Ledger      @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  kind               ProductKind
+  sku                String?     @db.VarChar(80)
+  name               String      @db.VarChar(200)
+  description        String?     @db.VarChar(1000)
+  /// سمات متغيرة (حجم، لون) تُخزَّن JSON.
+  variants           Json?
+  unitPrice          Decimal     @db.Decimal(20, 4)
+  costPrice          Decimal?    @db.Decimal(20, 4)
+  currencyId         String      @db.Uuid
+  currency           Currency    @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  taxRateId          String?     @db.Uuid
+  taxRate            TaxRate?    @relation("ProductTaxRate", fields: [taxRateId], references: [id], onDelete: SetNull)
+  /// للخدمات تبقى false ولا تُطلب. تُشتق من kind = SERVICE ولا تُخزَّن،
+  /// تفاديًا لتعارض العمود مع kind.
+  trackStock         Boolean     @default(false)
+  /// المخزون لا يُلزم منتجًا غير مخزَّن.
+  defaultWarehouseId String?     @db.Uuid
+  defaultWarehouse   Warehouse?  @relation("ProductDefaultWarehouse", fields: [defaultWarehouseId], references: [id], onDelete: SetNull)
+  archivedAt         DateTime?   @db.Timestamptz(3)
+  createdAt          DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime    @updatedAt @db.Timestamptz(3)
+
+  stockMovements StockMovement[]
+  drafts         DraftTransaction[] @relation("DraftProduct")
+
+  @@unique([ledgerId, sku])
+  @@index([ledgerId, kind, archivedAt])
+  @@index([taxRateId])
+  @@map("products")
+}
+
+/// مستودع. مستودع واحد افتراضيًا عند تفعيل المخزون (قسم 12).
+model Warehouse {
+  id         String    @id @default(uuid()) @db.Uuid
+  ledgerId   String    @db.Uuid
+  ledger     Ledger    @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  name       String    @db.VarChar(160)
+  /// مستودع افتراضي واحد فقط داخل الدفتر. لا يمكن فرضه بـ @@unique
+  /// لأن ذلك يمنع عدّة مستودعات غير افتراضية؛ يُفرض بقيد جزئي في PostgreSQL.
+  isDefault  Boolean   @default(false)
+  currencyId String    @db.Uuid
+  currency   Currency  @relation(fields: [currencyId], references: [id], onDelete: Restrict)
+  archivedAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
+
+  movements       StockMovement[]
+  defaultProducts Product[]       @relation("ProductDefaultWarehouse")
+
+  @@index([ledgerId, archivedAt])
+  @@map("warehouses")
+}
+
+/// حركة مخزون قابلة للتدقيق، مرتبطة بقيد.
+model StockMovement {
+  id           String            @id @default(uuid()) @db.Uuid
+  ledgerId     String            @db.Uuid
+  ledger       Ledger            @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  productId    String            @db.Uuid
+  product      Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  warehouseId  String            @db.Uuid
+  warehouse    Warehouse         @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  type         StockMovementType
+  /// موجب للوارد للمخزون، سالب للخروج.
+  quantity     Decimal           @db.Decimal(18, 6)
+  unitCost     Decimal?          @db.Decimal(20, 4)
+  entryId      String?           @db.Uuid
+  entry        JournalEntry?     @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  businessDate DateTime          @db.Date
+  note         String?           @db.VarChar(300)
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+
+  @@index([ledgerId, productId, businessDate])
+  @@index([warehouseId, productId])
+  @@index([entryId])
+  @@map("stock_movements")
+}
+
+/// نسبة ضريبية اختيارية (قسم 13).
+model TaxRate {
+  id         String    @id @default(uuid()) @db.Uuid
+  ledgerId   String    @db.Uuid
+  ledger     Ledger    @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  countryId  String?   @db.Uuid
+  country    Country?  @relation(fields: [countryId], references: [id], onDelete: SetNull)
+  code       String    @db.VarChar(40)
+  nameEn     String    @db.VarChar(160)
+  nameAr     String    @db.VarChar(160)
+  /// نسبة مئوية، وليست عددًا عشريًا.
+  percent    Decimal   @db.Decimal(9, 4)
+  currencyId String?   @db.Uuid
+  currency   Currency? @relation(fields: [currencyId], references: [id], onDelete: SetNull)
+  isActive   Boolean   @default(true)
+  archivedAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
+
+  products     Product[]          @relation("ProductTaxRate")
+  journalLines JournalLine[]
+  drafts       DraftTransaction[] @relation("DraftTaxRate")
+
+  @@unique([ledgerId, code])
+  @@index([ledgerId, isActive, archivedAt])
+  @@map("tax_rates")
+}
+
+// ============================================================================
+// الصوت والموافقة (أقسام 18 و19 و20)
+// ============================================================================
+
+/// موافقة صريحة قبل إرسال الصوت إلى الخادم (قسم 19). لا إرسال صامت.
+model AudioConsent {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  user          User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  /// نص الموافقة الذي عُرض على المستخدم بلغته.
+  consentText   String    @db.VarChar(1000)
+  policyVersion String    @db.VarChar(40)
+  providerId    String    @db.VarChar(80)
+  grantedAt     DateTime  @default(now()) @db.Timestamptz(3)
+  expiresAt     DateTime? @db.Timestamptz(3)
+  ipAddress     String?   @db.VarChar(45)
+  userAgent     String?   @db.VarChar(400)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+
+  recordings AudioRecording[]
+
+  @@index([userId, grantedAt])
+  @@index([providerId])
+  @@map("audio_consents")
+}
+
+/// تسجيل صوتي. ليس قيدًا معتمدًا (قسم 20).
+model AudioRecording {
+  id                 String       @id @default(uuid()) @db.Uuid
+  ledgerId           String       @db.Uuid
+  ledger             Ledger       @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  userId             String       @db.Uuid
+  user               User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  /// يجب وجود موافقة سارية قبل التسجيل.
+  consentId          String       @db.Uuid
+  consent            AudioConsent @relation(fields: [consentId], references: [id], onDelete: Restrict)
+  /// الملف نفسه في تخزين الكائنات، لا في قاعدة البيانات.
+  fileId             String       @db.Uuid
+  file               FileObject   @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  status             AudioStatus  @default(UPLOADED)
+  providerId         String?      @db.VarChar(80)
+  language           String       @default("ar") @db.VarChar(5)
+  durationMs         Int?
+  /// سياسة الاحتفاظ المعلنة، وبيانات الحذف بعدها.
+  retentionPolicy    String       @db.VarChar(60)
+  retentionExpiresAt DateTime?    @db.Timestamptz(3)
+  discardedAt        DateTime?    @db.Timestamptz(3)
+  createdAt          DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime     @updatedAt @db.Timestamptz(3)
+
+  transcription TranscriptionJob?
+  drafts        DraftTransaction[]
+
+  @@index([ledgerId, status])
+  @@index([userId, createdAt])
+  @@index([retentionExpiresAt])
+  @@map("audio_recordings")
+}
+
+/// مهمة تفريغ الصوت إلى نص ثم تحليل الحقول.
+model TranscriptionJob {
+  id              String              @id @default(uuid()) @db.Uuid
+  recordingId     String              @unique @db.Uuid
+  recording       AudioRecording      @relation(fields: [recordingId], references: [id], onDelete: Restrict)
+  status          TranscriptionStatus @default(QUEUED)
+  providerId      String?             @db.VarChar(80)
+  /// النص المستخرج.
+  transcript      String?             @db.Text
+  /// مستوى الثقة بين 0 و1 إن أعادته الخدمة.
+  confidence      Decimal?            @db.Decimal(5, 4)
+  /// الحقول المستخرجة قبل تحويلها إلى مسودة.
+  extractedFields Json?
+  errorCode       String?             @db.VarChar(80)
+  errorMessage    String?             @db.VarChar(1000)
+  startedAt       DateTime?           @db.Timestamptz(3)
+  finishedAt      DateTime?           @db.Timestamptz(3)
+  createdAt       DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime            @updatedAt @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@map("transcription_jobs")
+}
+
+// ============================================================================
+// التقارير والمشاركة الآمنة (قسم 23)
+// ============================================================================
+
+/// طلب تقرير: الفترة والنوع والدفتر مثبتة كحقول، لا داخل JSON.
+model ReportRequest {
+  id            String              @id @default(uuid()) @db.Uuid
+  ledgerId      String              @db.Uuid
+  ledger        Ledger              @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  requestedById String              @db.Uuid
+  requestedBy   User                @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+  type          ReportType
+  periodStart   DateTime            @db.Date
+  periodEnd     DateTime            @db.Date
+  status        ReportRequestStatus @default(QUEUED)
+  /// الملف الناتج في تخزين الكائنات، لا في قاعدة البيانات.
+  fileId        String?             @db.Uuid
+  file          FileObject?         @relation("ReportFile", fields: [fileId], references: [id], onDelete: SetNull)
+  /// معاملات التصفية الإضافية: تصنيف، حساب، جهة اتصال.
+  filters       Json?
+  errorMessage  String?             @db.VarChar(1000)
+  generatedAt   DateTime?           @db.Timestamptz(3)
+  expiresAt     DateTime?           @db.Timestamptz(3)
+  createdAt     DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime            @updatedAt @db.Timestamptz(3)
+
+  tokens ReportToken[]
+
+  @@index([ledgerId, type, periodStart, periodEnd])
+  @@index([requestedById, createdAt])
+  @@index([status, createdAt])
+  @@map("report_requests")
+}
+
+/// توكن مشاركة تقرير. يُخزَّن hash فقط، ولا يحمل أي محتوى حساس.
+model ReportToken {
+  id              String           @id @default(uuid()) @db.Uuid
+  reportRequestId String           @db.Uuid
+  reportRequest   ReportRequest    @relation(fields: [reportRequestId], references: [id], onDelete: Restrict)
+  /// hash للتوكن الخام؛ يُعاد التوكن مرة واحدة عند الإنشاء فقط.
+  tokenHash       String           @unique @db.VarChar(128)
+  status          ShareTokenStatus @default(ACTIVE)
+  expiresAt       DateTime         @db.Timestamptz(3)
+  maxUses         Int?
+  useCount        Int              @default(0)
+  revokedAt       DateTime?        @db.Timestamptz(3)
+  createdById     String?          @db.Uuid
+  createdBy       User?            @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(3)
+
+  revocations RevokedReportToken[]
+
+  @@index([reportRequestId, status])
+  @@index([expiresAt])
+  @@map("report_tokens")
+}
+
+/// سجل إبطال التوكنات: لا يُحذف التوكن، بل يُسجَّل إبطاله.
+model RevokedReportToken {
+  id                    String      @id @default(uuid()) @db.Uuid
+  tokenId               String      @db.Uuid
+  token                 ReportToken @relation(fields: [tokenId], references: [id], onDelete: Restrict)
+  revokedAt             DateTime    @default(now()) @db.Timestamptz(3)
+  revokedById           String?     @db.Uuid
+  revokedBy             User?       @relation("ReportTokenRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+  reason                String?     @db.VarChar(500)
+  /// بصمة التوكن وقت الإبطال، لمنع إعادة استخدامه.
+  tokenHashAtRevocation String      @db.VarChar(128)
+  createdAt             DateTime    @default(now()) @db.Timestamptz(3)
+
+  @@index([tokenId])
+  @@index([tokenHashAtRevocation])
+  @@map("revoked_report_tokens")
+}
+
+// ============================================================================
+// الملفات والإيصالات والتدقيق والإشعارات
+// ============================================================================
+
+/// ملف مخزَّن خارج قاعدة البيانات؛ بيانات الملف نفسها لا تُخزَّن هنا.
+model FileObject {
+  id             String     @id @default(uuid()) @db.Uuid
+  /// اختياري: قد يكون الملف مرتبطًا بدفتر أو مستقلًا عنه.
+  ledgerId       String?    @db.Uuid
+  ledger         Ledger?    @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  storageKey     String     @unique @db.VarChar(400)
+  originalName   String?    @db.VarChar(255)
+  mimeType       String     @db.VarChar(120)
+  sizeBytes      BigInt
+  checksumSha256 String     @db.Char(64)
+  status         FileStatus @default(PENDING)
+  uploadedById   String?    @db.Uuid
+  uploadedBy     User?      @relation("FileUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  /// تاريخ الحذف من التخزين، مع بقاء السجل.
+  deletedAt      DateTime?  @db.Timestamptz(3)
+  createdAt      DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime   @updatedAt @db.Timestamptz(3)
+
+  receipts        Receipt[]
+  audioRecordings AudioRecording[]
+  reportFiles     ReportRequest[]  @relation("ReportFile")
+
+  @@index([ledgerId, status])
+  @@index([checksumSha256])
+  @@map("file_objects")
+}
+
+/// إيصال مرفق بعملية.
+model Receipt {
+  id              String        @id @default(uuid()) @db.Uuid
+  ledgerId        String        @db.Uuid
+  ledger          Ledger        @relation(fields: [ledgerId], references: [id], onDelete: Restrict)
+  fileId          String        @db.Uuid
+  file            FileObject    @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  uploadedById    String?       @db.Uuid
+  uploadedBy      User?         @relation("ReceiptUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+  status          ReceiptStatus @default(UPLOADED)
+  /// حقول مستخرجة من الإيصال قبل الربط بعملية.
+  extractedFields Json?
+  entryId         String?       @db.Uuid
+  entry           JournalEntry? @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  businessDate    DateTime?     @db.Date
+  createdAt       DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime      @updatedAt @db.Timestamptz(3)
+
+  @@index([ledgerId, status])
+  @@index([entryId])
+  @@map("receipts")
+}
+
+/// سجل تدقيق عام للمنصة: دخول، صلاحية، إعدادات، محاولة حذف مرفوضة.
+model AuditLog {
+  id         String      @id @default(uuid()) @db.Uuid
+  actorId    String?     @db.Uuid
+  actor      User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     AuditAction
+  entityType String      @db.VarChar(80)
+  entityId   String?     @db.Uuid
+  /// لا يحتوي أسرارًا أو كلمات مرور أو توكنات خام.
+  payload    Json?
+  ipAddress  String?     @db.VarChar(45)
+  userAgent  String?     @db.VarChar(400)
+  createdAt  DateTime    @default(now()) @db.Timestamptz(3)
+
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// إشعار للمستخدم (قسم 24).
+model Notification {
+  id           String             @id @default(uuid()) @db.Uuid
+  userId       String             @db.Uuid
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// قد يكون الإشعار مرتبطًا بدفتر.
+  ledgerId     String?            @db.Uuid
+  ledger       Ledger?            @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  type         NotificationType
+  status       NotificationStatus @default(UNREAD)
+  title        String             @db.VarChar(200)
+  body         String?            @db.VarChar(1000)
+  /// مرجع الكيان المرتبط كنص، لا كقيد مادي.
+  entityRef    String?            @db.VarChar(120)
+  alertEventId String?            @db.Uuid
+  alertEvent   AlertEvent?        @relation(fields: [alertEventId], references: [id], onDelete: SetNull)
+  readAt       DateTime?          @db.Timestamptz(3)
+  createdAt    DateTime           @default(now()) @db.Timestamptz(3)
+
+  @@index([userId, status, createdAt])
+  @@index([ledgerId, createdAt])
+  @@map("notifications")
+}
+
+/// اشتراك دفع للمتصفح (PWA).
+model PushSubscription {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ledgerId   String?   @db.Uuid
+  ledger     Ledger?   @relation(fields: [ledgerId], references: [id], onDelete: Cascade)
+  endpoint   String    @unique @db.VarChar(500)
+  p256dh     String    @db.VarChar(200)
+  auth       String    @db.VarChar(200)
+  userAgent  String?   @db.VarChar(400)
+  expiresAt  DateTime? @db.Timestamptz(3)
+  lastUsedAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@index([userId, createdAt])
+  @@map("push_subscriptions")
+}

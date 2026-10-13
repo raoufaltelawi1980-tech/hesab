@@ -1,0 +1,20 @@
+{
+  "name": "hesab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "منصة حساب — HESAB",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@12.8.1",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/*\" run dev",
+    "dev:web": "pnpm --filter @hesab/web run dev",
+    "dev:api": "pnpm --filter @hesab/api run dev",
+    "build": "pnpm --recursive --filter \"./apps/*\" run build",
+    "start:web": "pnpm --filter @hesab/web run start",
+    "start:api": "pnpm --filter @hesab/api run start:prod",
+    "typecheck": "pnpm --recursive --filter \"./apps/*\" run typecheck"
+  }
+}

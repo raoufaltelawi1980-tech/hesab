@@ -1,0 +1,38 @@
+:root {
+  --hesab-charcoal: #171817;
+  --hesab-charcoal-soft: #242628;
+  --hesab-charcoal-muted: #3A3D40;
+  --hesab-ivory: #F1EEE4;
+  --hesab-pearl: #FBFAF6;
+  --hesab-white: #FFFFFF;
+  --color-income: #2F8F68;
+  --color-income-bg: #E6F4EF;
+  --color-expense: #B85C5C;
+  --color-expense-bg: #F9E8E8;
+  --color-warning: #C79A45;
+  --color-warning-bg: #F9F1DF;
+  --color-info: #6687A8;
+  --color-info-bg: #E8EEF4;
+  --bg-app: var(--hesab-charcoal);
+  --bg-card: #1E2022;
+  --bg-card-elevated: #2A2D30;
+  --bg-input: #26292C;
+  --text-primary: var(--hesab-ivory);
+  --text-secondary: #A8A29A;
+  --text-muted: #6B6760;
+  --border: #2E3134;
+  --border-strong: #3D4044;
+  --bg-light: var(--hesab-ivory);
+  --bg-light-card: var(--hesab-white);
+  --text-dark: var(--hesab-charcoal);
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 28px;
+  --radius-full: 999px;
+  --font-arabic: 'Noto Kufi Arabic', sans-serif;
+  --font-latin: 'Inter', sans-serif;
+}
+[dir="rtl"] { --font-main: var(--font-arabic); }
+[dir="ltr"] { --font-main: var(--font-latin); }
+.icon { color: currentColor; stroke-width: 1.6; }

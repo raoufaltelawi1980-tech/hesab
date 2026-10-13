@@ -1,0 +1,14 @@
+packages:
+  - "apps/*"
+
+# سياسة تشغيل سكربتات البناء للتبعيات
+# unrs-resolver: مطلوب لـ eslint-config-next (بنية lint في apps/web)
+# sharp: غير مطلوب في هذه المرحلة (لا صور بعد)، فيُمنع بناؤه
+# prisma / @prisma/engines: تنزيل محركات Prisma اللازمة لأوامره (validate/generate/migrate)
+# @prisma/client: توليد عميل Prisma بعد تثبيت المخطط
+allowBuilds:
+  unrs-resolver: true
+  sharp: false
+  prisma: true
+  "@prisma/client": true
+  "@prisma/engines": true

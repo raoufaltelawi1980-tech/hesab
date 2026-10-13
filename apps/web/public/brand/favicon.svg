@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 110" role="img" aria-label="HESAB Mark">
+  <!-- 3 dots -->
+  <g fill="currentColor">
+    <circle cx="18" cy="22" r="7.5"/>
+    <circle cx="18" cy="45" r="7.5"/>
+    <circle cx="18" cy="68" r="7.5"/>
+    <!-- Upper wing -->
+    <path d="M36 6 L86 6 L86 6 C89.5 6 90.8 8.2 89.5 12 L77.5 39.5 C76.2 43 73 44.2 69.5 44.2 L32 44.2 C28.5 44.2 27 42 28.3 38.2 L34.2 12.5 C35 9 36.5 6 40 6 Z" />
+    <!-- Lower wing with tail -->
+    <path d="M36 51 L86 51 C89.5 51 90.8 53.2 89.5 57 L77.5 84.5 C76.2 88 73 89.2 69.5 89.2 L48 89.2 L42 105.5 L36.5 89.2 L32 89.2 C28.5 89.2 27 87 28.3 83.2 L34.2 57.5 C35 54 36.5 51 40 51 Z" />
+  </g>
+</svg>
